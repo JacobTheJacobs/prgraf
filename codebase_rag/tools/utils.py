@@ -35,3 +35,4 @@ def safe_resolve_path(
         )
 
     return target_path
+

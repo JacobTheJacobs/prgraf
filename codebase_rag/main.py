@@ -39,7 +39,7 @@ from .config import (
 )
 from .graph_updater import GraphUpdater, MemgraphIngestor
 from .parser_loader import load_parsers
-from .services.llm import CypherGenerator, create_rag_orchestrator
+from .services.llm import CypherGenerator, create_rag_orchestrator, create_reasoning_supervisor
 from .tools.code_retrieval import CodeRetriever, create_code_retrieval_tool
 from .tools.codebase_query import create_query_tool
 from .tools.directory_lister import create_directory_lister_tool
