@@ -1,0 +1,180 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Graph-Code UI</title>
+    <style>
+      :root { --bg:#0b1020; --card:#121a33; --fg:#e6ecff; --muted:#99a3c2; --accent:#7aa2ff; }
+      *{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.4 system-ui,Segoe UI,Roboto}
+      .wrap{max-width:920px;margin:40px auto;padding:0 16px}
+      h1{font-size:24px;margin:0 0 16px}
+      .card{background:var(--card);border:1px solid #1e2b55;border-radius:12px;padding:16px;margin:12px 0}
+      label{display:block;font-size:12px;color:var(--muted);margin:8px 0 4px}
+      input,select,textarea{width:100%;padding:10px;border-radius:8px;border:1px solid #2a3c77;background:#0e1630;color:var(--fg)}
+      textarea{min-height:90px}
+      button{background:var(--accent);color:#081020;border:0;padding:10px 14px;border-radius:8px;font-weight:600;cursor:pointer}
+      .row{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+      .actions{display:flex;gap:8px;margin-top:10px}
+      pre{white-space:pre-wrap;background:#0e1430;border-radius:8px;padding:12px;border:1px solid #263062}
+      .inline{display:flex;gap:8px;align-items:center}
+      .list{border:1px solid #2a3c77;border-radius:8px;max-height:260px;overflow:auto;margin-top:8px}
+      .list a{display:block;color:var(--fg);text-decoration:none;padding:8px 10px;border-bottom:1px solid #1a244d}
+      .list a:hover{background:#0e1630}
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <h1>Graph-Code</h1>
+      <div class="card">
+        <div class="row">
+          <div>
+            <label>Repository Path</label>
+            <div class="inline">
+              <input id="repo" placeholder="C:\\path\\to\\repo or /path/to/repo" />
+              <button type="button" onclick="openBrowser()">Browse…</button>
+            </div>
+            <small id="repoNote" style="color:var(--muted)"></small>
+          </div>
+          <div>
+            <label>Provider</label>
+            <select id="provider">
+              <option value="local">Ollama (local)</option>
+              <option value="gemini">Gemini (cloud)</option>
+            </select>
+          </div>
+        </div>
+        <div class="row">
+          <div>
+            <label>Orchestrator Model</label>
+            <select id="orch"></select>
+          </div>
+          <div>
+            <label>Cypher Model</label>
+            <select id="cypher"></select>
+          </div>
+        </div>
+        <div class="actions">
+          <button onclick="ingest()">Ingest</button>
+          <button onclick="ask()">Ask</button>
+          <button onclick="optimize()">Optimize</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <label>Question</label>
+        <textarea id="question" placeholder="e.g. List all classes with 'user' in their name"></textarea>
+        <label>Language (for optimize)</label>
+        <input id="language" placeholder="python, javascript, cpp, ..." />
+      </div>
+
+      <div class="card">
+        <label>Output</label>
+        <pre id="output">Ready.</pre>
+      </div>
+    </div>
+
+    <div class="card" id="browser" style="display:none">
+      <div class="inline" style="justify-content:space-between">
+        <div>
+          <strong>Current:</strong>
+          <span id="browsePath">Computer</span>
+        </div>
+        <div class="actions" style="margin:0">
+          <button type="button" onclick="useCurrentFolder()">Use this folder</button>
+          <button type="button" onclick="hideBrowser()">Hide</button>
+        </div>
+      </div>
+      <div class="inline" style="gap:12px;margin-top:8px">
+        <div id="roots" class="inline" style="gap:8px"></div>
+        <a href="#" id="parentLink" onclick="goParent();return false;" style="display:none">Parent ..</a>
+      </div>
+      <div class="list" id="browseList"></div>
+    </div>
+
+    <script>
+      async function post(url, params){
+        const p = new URLSearchParams(params);
+        const r = await fetch(url + '?' + p.toString(), { method: 'POST' });
+        if(!r.ok){
+          const txt = await r.text();
+          throw new Error(txt || (r.status+': '+r.statusText));
+        }
+        return r.json();
+      }
+      async function get(url, params){
+        const p = params ? ('?' + new URLSearchParams(params).toString()) : '';
+        const r = await fetch(url + p);
+        if(!r.ok){ throw new Error(await r.text()); }
+        return r.json();
+      }
+      function val(id){ return document.getElementById(id).value; }
+      function setOut(o){ document.getElementById('output').textContent = typeof o==='string' ? o : JSON.stringify(o,null,2); }
+      function common(){ return { repo_path: val('repo'), provider: val('provider'), orchestrator_model: sel('orch'), cypher_model: sel('cypher') }; }
+      function sel(id){ const el=document.getElementById(id); return el.value||undefined; }
+
+      // Folder picker
+      function openBrowser(){ const el=document.getElementById('browser'); el.style.display='block'; loadDir(null); }
+      function hideBrowser(){ document.getElementById('browser').style.display='none'; }
+      async function loadDir(path){
+        const data = await get('/fs/list', path?{path}:{ });
+        document.getElementById('browsePath').textContent = data.current_path || 'Computer';
+        const roots = document.getElementById('roots');
+        roots.innerHTML = '';
+        if(data.roots){
+          roots.textContent = 'Roots: ';
+          data.roots.forEach(r => {
+            const a = document.createElement('a'); a.href='#'; a.textContent=r; a.onclick=()=>{ loadDir(r); return false; }; roots.appendChild(a);
+          });
+        }
+        const parentLink = document.getElementById('parentLink');
+        parentLink.style.display = data.parent ? 'inline' : 'none';
+        parentLink.setAttribute('data-parent', data.parent || '');
+
+        const list = document.getElementById('browseList');
+        list.innerHTML='';
+        (data.entries||[]).forEach(e => {
+          const a = document.createElement('a'); a.href='#'; a.textContent=e.name; a.onclick=()=>{ loadDir(e.path); return false; }; list.appendChild(a);
+        });
+        list.onclick = null;
+      }
+      function goParent(){ const p = document.getElementById('parentLink').getAttribute('data-parent'); if(p){ loadDir(p); } }
+      function useCurrentFolder(){ const p = document.getElementById('browsePath').textContent; if(p && p !== 'Computer'){ document.getElementById('repo').value = p; hideBrowser(); } }
+
+      // Models dropdowns
+      async function loadModels(){
+        const provider = document.getElementById('provider').value;
+        const data = await get('/models');
+        const conf = data.providers[provider];
+        const orch = document.getElementById('orch');
+        const cyp = document.getElementById('cypher');
+        orch.innerHTML = '';
+        cyp.innerHTML = '';
+        (conf.orchestrator||[]).forEach(m => { const o=document.createElement('option'); o.value=o.textContent=m; orch.appendChild(o); });
+        (conf.cypher||[]).forEach(m => { const o=document.createElement('option'); o.value=o.textContent=m; cyp.appendChild(o); });
+      }
+      document.getElementById('provider').addEventListener('change', loadModels);
+      loadModels();
+      function saveRepo(p){ if(p){ localStorage.setItem('graphcode.repo', p); document.getElementById('repoNote').textContent = 'Using: '+p; } }
+      function loadRepo(){ const p = localStorage.getItem('graphcode.repo'); if(p){ document.getElementById('repo').value = p; document.getElementById('repoNote').textContent = 'Using: '+p; } }
+
+      async function ingest(){
+        setOut('Ingesting...');
+        try{ const res = await post('/ingest', { ...common(), clean: true }); setOut(res); saveRepo(res.repo); }catch(e){ setOut(e.message); }
+      }
+      async function ask(){
+        setOut('Asking...');
+        try{ const res = await post('/ask', { ...common(), question: val('question') }); setOut(res); if(res.repo){ saveRepo(res.repo); } }catch(e){ setOut(e.message); }
+      }
+      async function optimize(){
+        setOut('Optimizing...');
+        try{ const res = await post('/optimize', { ...common(), language: val('language') }); setOut(res); if(res.repo){ saveRepo(res.repo); } }catch(e){ setOut(e.message); }
+      }
+
+      // Initialize persisted repo and models
+      loadRepo();
+    </script>
+  </body>
+  </html>
+
+

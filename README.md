@@ -387,6 +387,25 @@ The agent will incorporate the guidance from your reference documents when sugge
 - `--repo-path`: Path to repository (defaults to current directory)
 - `--reference-document`: Path to reference documentation (optimization only)
 
+## 🌐 Minimal FastAPI UI and API (New!)
+
+Run a small server with API + tiny UI to ingest, ask, and optimize:
+
+```bash
+uv run uvicorn codebase_rag.api:app --reload --port 8080
+```
+
+Open the UI at `http://localhost:8080/`.
+
+### API Endpoints
+- `POST /ingest?repo_path=...&clean=true&provider=local|gemini&orchestrator_model=...&cypher_model=...`
+- `POST /ask?repo_path=...&question=...&provider=local|gemini&orchestrator_model=...&cypher_model=...`
+- `POST /optimize?repo_path=...&language=python&provider=local|gemini&orchestrator_model=...&cypher_model=...`
+
+Notes:
+- `provider=local` uses Ollama defaults (`llama3`). `provider=gemini` uses Gemini defaults.
+- Ensure Memgraph is running: `docker-compose up -d`.
+
 ## 📊 Graph Schema
 
 The knowledge graph uses the following node types and relationships:

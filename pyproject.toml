@@ -20,6 +20,8 @@ dependencies = [
     "diff-match-patch>=20241021",
     "click>=8.0.0",
     "pytest-xdist>=3.8.0",
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.30.0",
 ]
 
 [tool.setuptools]
