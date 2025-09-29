@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+import json
 from typing import Any, Literal
 
 from fastapi import FastAPI, HTTPException, Query
@@ -33,6 +34,61 @@ MODEL_MAP: dict[str, dict[str, str]] = {
         "cypher": "gpt-oss:latest",
     },
 }
+
+
+_FS_KEYS = {"directory_path", "current_path", "entries", "roots", "parent", "name", "path", "type"}
+
+
+def _looks_like_fs_payload(obj: Any) -> bool:
+    try:
+        if isinstance(obj, str):
+            data = json.loads(obj)
+        else:
+            data = obj
+        if isinstance(data, dict):
+            keys = set(data.keys())
+            if not keys:
+                return False
+            # If all top-level keys are filesystem-ish, treat as tool output
+            return keys.issubset(_FS_KEYS)
+        return False
+    except Exception:
+        return False
+
+
+def _extract_text_answer(raw: Any) -> str | None:
+    """Best-effort normalization of agent output into plain text.
+
+    - If output is a JSON object with 'answer', return that.
+    - If output is a JSON string with the same, return it.
+    - Otherwise return stringified text.
+    """
+    if raw is None:
+        return None
+    # Pydantic-AI Agent often returns objects with .output already str
+    if isinstance(raw, dict):
+        # Direct JSON with 'answer'
+        ans = raw.get("answer")
+        if isinstance(ans, str) and ans.strip():
+            return ans.strip()
+        # Fallback: stringify
+        try:
+            return json.dumps(raw, ensure_ascii=False)
+        except Exception:
+            return str(raw)
+    text = str(raw)
+    # Try parse JSON string
+    try:
+        data = json.loads(text)
+        if isinstance(data, dict):
+            ans = data.get("answer")
+            if isinstance(ans, str) and ans.strip():
+                return ans.strip()
+            # fallback to stringified dict
+            return json.dumps(data, ensure_ascii=False)
+    except Exception:
+        pass
+    return text
 
 
 def _list_local_models() -> set[str]:
