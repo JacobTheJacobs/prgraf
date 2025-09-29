@@ -17,6 +17,8 @@
       .row{display:grid;grid-template-columns:1fr 1fr;gap:12px}
       .actions{display:flex;gap:8px;margin-top:10px}
       pre{white-space:pre-wrap;background:#0e1430;border-radius:8px;padding:12px;border:1px solid #263062}
+      details{margin-top:10px}
+      details summary{cursor:pointer;color:var(--muted)}
       .inline{display:flex;gap:8px;align-items:center}
       .list{border:1px solid #2a3c77;border-radius:8px;max-height:260px;overflow:auto;margin-top:8px}
       .list a{display:block;color:var(--fg);text-decoration:none;padding:8px 10px;border-bottom:1px solid #1a244d}
@@ -71,6 +73,10 @@
       <div class="card">
         <label>Output</label>
         <pre id="output">Ready.</pre>
+        <details id="rawBox" style="display:none">
+          <summary>Raw response</summary>
+          <pre id="raw"></pre>
+        </details>
       </div>
     </div>
 
@@ -109,10 +115,32 @@
         return r.json();
       }
       function val(id){ return document.getElementById(id).value; }
-      function setOut(o){ document.getElementById('output').textContent = typeof o==='string' ? o : JSON.stringify(o,null,2); }
+      function setOut(o){
+        const out = document.getElementById('output');
+        const rawBox = document.getElementById('rawBox');
+        const raw = document.getElementById('raw');
+        if(typeof o === 'string'){
+          out.textContent = o;
+          rawBox.style.display = 'none';
+          return;
+        }
+        try{
+          if(o && typeof o.answer === 'string' && o.answer.trim()){
+            out.textContent = o.answer;
+          }else{
+            out.textContent = JSON.stringify(o, null, 2);
+          }
+          raw.textContent = JSON.stringify(o, null, 2);
+          rawBox.style.display = 'block';
+        }catch(e){
+          out.textContent = String(e);
+          rawBox.style.display = 'none';
+        }
+      }
       function common(){ return { repo_path: val('repo'), provider: val('provider'), orchestrator_model: sel('orch'), cypher_model: sel('cypher') }; }
       function sel(id){ const el=document.getElementById(id); return el.value||undefined; }
 
+      
       // Folder picker
       function openBrowser(){ const el=document.getElementById('browser'); el.style.display='block'; loadDir(null); }
       function hideBrowser(){ document.getElementById('browser').style.display='none'; }

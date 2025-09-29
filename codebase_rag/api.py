@@ -9,6 +9,7 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from loguru import logger
+from pydantic_ai.exceptions import UnexpectedModelBehavior
 
 from .config import detect_provider_from_model, settings
 from .graph_updater import GraphUpdater
@@ -198,10 +199,10 @@ def ingest(
                     __import__("json").dumps(data, indent=2, ensure_ascii=False),
                     encoding="utf-8",
                 )
-        # Remember last repo on successful ingest
         global LAST_REPO_PATH
         LAST_REPO_PATH = str(project_root)
-        return JSONResponse({"status": "ok", "repo": LAST_REPO_PATH})
+        issues_log = str(project_root / ".tmp" / "ingest_issues.log")
+        return JSONResponse({"status": "ok", "repo": LAST_REPO_PATH, "issues_log": issues_log})
     except Exception as e:
         logger.exception("Ingest failed")
         raise HTTPException(status_code=500, detail=str(e))
@@ -247,30 +248,59 @@ async def ask(
             else:
                 raise HTTPException(status_code=400, detail="repo_path is required (no previous ingest found)")
 
-        project_root = _setup_common_initialization(effective_repo)
+        # Do NOT wipe .tmp during ask. Just resolve the path and ensure tmp exists.
+        project_root = Path(effective_repo).resolve()
+        try:
+            (project_root / ".tmp").mkdir(exist_ok=True)
+        except Exception:
+            pass
         _apply_model_selection(provider, orchestrator_model, cypher_model)
 
         with MemgraphIngestor(
             host=settings.MEMGRAPH_HOST, port=settings.MEMGRAPH_PORT
         ) as ingestor:
             rag_agent = _initialize_services_and_agent(str(project_root), ingestor)
-            response = await rag_agent.run(question, message_history=[])
-            output = getattr(response, "output", None)
-            # Normalize
-            text = _extract_text_answer(output)
-            if not text or _looks_like_fs_payload(text):
-                # Defensive fallback: try once more with a simpler prompt
-                logger.warning("Empty model response; retrying once with simplified prompt")
-                response = await rag_agent.run(
-                    (question.strip() or "Describe the project structure.") +
-                    "\nPlease answer in plain text with a concise explanation.",
-                    message_history=[]
-                )
-                output = getattr(response, "output", None) or ""
+            text: str | None = None
+            try:
+                response = await rag_agent.run(question, message_history=[])
+                output = getattr(response, "output", None)
                 text = _extract_text_answer(output)
+                # Best-effort pass-through of structured fields if orchestration JSON is returned
+                extra: dict[str, object] = {}
+                try:
+                    if isinstance(output, str):
+                        parsed = json.loads(output)
+                    elif isinstance(output, dict):
+                        parsed = output
+                    else:
+                        parsed = None
+                    if isinstance(parsed, dict):
+                        for k in ("plan", "citations"):
+                            if k in parsed:
+                                extra[k] = parsed[k]
+                except Exception:
+                    pass
+            except UnexpectedModelBehavior:
+                logger.warning("Model returned empty response; retrying with simplified prompt")
+            if not text or _looks_like_fs_payload(text):
+                try:
+                    response = await rag_agent.run(
+                        (question.strip() or "Describe the project structure.") +
+                        "\nPlease answer in plain text with a concise explanation (no JSON).",
+                        message_history=[]
+                    )
+                    output = getattr(response, "output", None) or ""
+                    text = _extract_text_answer(output)
+                except UnexpectedModelBehavior:
+                    text = None
             if not text:
                 raise RuntimeError("Model returned empty response")
-        return JSONResponse({"status": "ok", "answer": text, "repo": str(project_root)})
+        payload = {"status": "ok", "answer": text, "repo": str(project_root)}
+        try:
+            payload.update(extra)  # type: ignore[arg-type]
+        except Exception:
+            pass
+        return JSONResponse(payload)
     except Exception as e:
         logger.exception("Ask failed")
         raise HTTPException(status_code=500, detail=str(e))
@@ -294,7 +324,11 @@ async def optimize(
             else:
                 raise HTTPException(status_code=400, detail="repo_path is required (no previous ingest found)")
 
-        project_root = _setup_common_initialization(effective_repo)
+        project_root = Path(effective_repo).resolve()
+        try:
+            (project_root / ".tmp").mkdir(exist_ok=True)
+        except Exception:
+            pass
         _apply_model_selection(provider, orchestrator_model, cypher_model)
 
         with MemgraphIngestor(
@@ -308,14 +342,20 @@ async def optimize(
                 instructions += (
                     f" Use guidance from {reference_document} when proposing changes."
                 )
-            response = await rag_agent.run(instructions, message_history=[])
-            output = getattr(response, "output", None) or ""
-            text = _extract_text_answer(output) or ""
-            if not text or _looks_like_fs_payload(text):
-                logger.warning("Empty model response during optimize; retrying once")
-                response = await rag_agent.run((instructions + "\nReturn a short bullet list in plain text.").strip(), message_history=[])
+            text: str | None = None
+            try:
+                response = await rag_agent.run(instructions, message_history=[])
                 output = getattr(response, "output", None) or ""
                 text = _extract_text_answer(output) or ""
+            except UnexpectedModelBehavior:
+                logger.warning("Empty model response during optimize; retrying once with plain text instruction")
+            if not text or _looks_like_fs_payload(text):
+                try:
+                    response = await rag_agent.run((instructions + "\nReturn a short bullet list in plain text.").strip(), message_history=[])
+                    output = getattr(response, "output", None) or ""
+                    text = _extract_text_answer(output) or ""
+                except UnexpectedModelBehavior:
+                    text = None
             if not text:
                 raise RuntimeError("Model returned empty response")
         return JSONResponse({"status": "ok", "result": text, "repo": str(project_root)})

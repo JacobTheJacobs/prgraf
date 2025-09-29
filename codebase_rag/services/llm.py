@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import json, re
 from typing import cast
 
@@ -18,6 +20,8 @@ from ..prompts import (
     LOCAL_CYPHER_SYSTEM_PROMPT,
     RAG_ORCHESTRATOR_SYSTEM_PROMPT,
 )
+
+ 
 
 # Optional supervisor agent that critiques plans and enforces graph-first behavior
 REASONING_SUPERVISOR_SYSTEM_PROMPT = """
@@ -228,6 +232,119 @@ class CypherGenerator:
             return best.get("cypher")
         except Exception:
             return None
+
+    async def generate_candidates(self, natural_language_query: str) -> list[str]:
+        """
+        Generate up to 3 Cypher candidates, best first. Each candidate is
+        validated to include a label-specific MATCH, at least one narrowing
+        predicate, and LIMIT <= 50. Falls back to a single cleaned query.
+        """
+        logger.info(f"[CypherGenerator] Generating candidates for: '{natural_language_query}'")
+        try:
+            result = await self.agent.run(natural_language_query)
+            text = result.output if isinstance(result.output, str) else str(result.output)
+
+            # Attempt multi-candidate JSON
+            try:
+                payload = text.strip()
+                if payload.startswith("```"):
+                    payload = payload.strip("`\n ")
+                    if "\n" in payload:
+                        first, rest = payload.split("\n", 1)
+                        if first.lower() in {"json", "cypher"}:
+                            payload = rest
+                if payload.lower().startswith("json"):
+                    payload = payload[4:].lstrip()
+                data = json.loads(payload)
+                cands = data.get("candidates", []) if isinstance(data, dict) else []
+                cyphers: list[str] = []
+                for c in cands:
+                    cy = c.get("cypher") if isinstance(c, dict) else None
+                    if isinstance(cy, str):
+                        cyphers.append(_clean_cypher_response(cy))
+                cyphers = sorted(cyphers, key=self._score_candidate, reverse=True)[:3]
+                # Clamp LIMIT and validate
+                validated: list[str] = []
+                for q in cyphers:
+                    q = re.sub(r"LIMIT\s+(\d+)", lambda m: f"LIMIT {min(50, int(m.group(1)))}", q, flags=re.IGNORECASE)
+                    up = q.upper()
+                    has_label_specific = re.search(r"MATCH\s*\(\s*\w+\s*:\s*(CLASS|FUNCTION|METHOD|FILE|MODULE)\b", up) is not None
+                    has_narrow = any(k in up for k in [" STARTS WITH ", " EXTENSION ", "QUALIFIED_NAME", " DECORATORS ", " CONTAINS "]) or re.search(r"-\s*\[:\w+\]\s*->", up) is not None
+                    if has_label_specific and has_narrow and " LIMIT " in up and " MATCH " in up:
+                        validated.append(_clean_cypher_response(q))
+                if validated:
+                    logger.info(f"[CypherGenerator] Selected {len(validated)} Cypher candidate(s)")
+                    return validated
+            except Exception:
+                pass
+
+            # Fallback: single-query path
+            cypher = _clean_cypher_response(text)
+            up = cypher.upper()
+            if "MATCH" not in up or "LIMIT" not in up:
+                raise LLMGenerationError(f"LLM did not generate a valid query. Output: {text}")
+            cypher = re.sub(r"LIMIT\s+(\d+)", lambda m: f"LIMIT {min(50, int(m.group(1)))}", cypher, flags=re.IGNORECASE)
+            return [cypher]
+        except Exception as e:
+            logger.error(f"[CypherGenerator] Error: {e}")
+            raise LLMGenerationError(f"Cypher generation failed: {e}") from e
+
+    async def generate_candidates(self, natural_language_query: str) -> list[str]:
+        """
+        Returns up to 3 Cypher candidates (strings), best-scored first.
+        Falls back to a single cleaned query if JSON candidates are not returned.
+        """
+        logger.info(f"[CypherGenerator] Generating candidates for: '{natural_language_query}'")
+        try:
+            result = await self.agent.run(natural_language_query)
+            text = result.output if isinstance(result.output, str) else str(result.output)
+            # Try parse as JSON multi-candidate payload
+            try:
+                payload = text.strip()
+                if payload.startswith("```"):
+                    payload = payload.strip("`\n ")
+                    if "\n" in payload:
+                        first, rest = payload.split("\n", 1)
+                        if first.lower() in {"json", "cypher"}:
+                            payload = rest
+                if payload.lower().startswith("json"):
+                    payload = payload[4:].lstrip()
+                data = json.loads(payload)
+                cands = data.get("candidates", []) if isinstance(data, dict) else []
+                cyphers = []
+                for c in cands:
+                    cy = c.get("cypher") if isinstance(c, dict) else None
+                    if isinstance(cy, str) and "MATCH" in cy.upper():
+                        cyphers.append(_clean_cypher_response(cy))
+                # Sort by heuristic score
+                cyphers = sorted(cyphers, key=self._score_candidate, reverse=True)[:3]
+                # Clamp LIMITs
+                cyphers = [re.sub(r"LIMIT\s+(\d+)", lambda m: f"LIMIT {min(50, int(m.group(1)))}", q, flags=re.IGNORECASE) for q in cyphers]
+                # Filter invalid
+                filtered: list[str] = []
+                for q in cyphers:
+                    up = q.upper()
+                    has_label_specific = re.search(r"MATCH\s*\(\s*\w+\s*:\s*(CLASS|FUNCTION|METHOD|FILE|MODULE)\b", up) is not None
+                    has_narrow = any(k in up for k in [" STARTS WITH ", " EXTENSION ", "QUALIFIED_NAME", " DECORATORS ", " CONTAINS "]) or re.search(r"-\s*\[:\w+\]\s*->", up) is not None
+                    if has_label_specific and has_narrow and " LIMIT " in up:
+                        filtered.append(q)
+                if filtered:
+                    logger.info(f"[CypherGenerator] Using {len(filtered)} candidate query(ies)")
+                    return filtered
+            except Exception:
+                pass
+
+            # Fallback: single cleaned query
+            single = _clean_cypher_response(text)
+            up = single.upper()
+            if "MATCH" not in up or "LIMIT" not in up:
+                raise LLMGenerationError(f"LLM did not generate a valid query. Output: {text}")
+            single = re.sub(r"LIMIT\s+(\d+)", lambda m: f"LIMIT {min(50, int(m.group(1)))}", single, flags=re.IGNORECASE)
+            logger.info("[CypherGenerator] Falling back to single candidate")
+            return [single]
+        except Exception as e:
+            logger.error(f"[CypherGenerator] Error generating candidates: {e}")
+            raise LLMGenerationError(f"Cypher generation failed: {e}") from e
 
     async def generate(self, natural_language_query: str) -> str:
         logger.info(f"[CypherGenerator] Generating query for: '{natural_language_query}'")

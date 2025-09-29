@@ -46,24 +46,44 @@ def create_query_tool(
         logger.info(f"[Tool:QueryGraph] Received NL query: '{natural_language_query}'")
         cypher_query = "N/A"
         try:
-            cypher_query = await cypher_gen.generate(natural_language_query)
-            # Server-side clamp: ensure LIMIT <= 50 even if prompt forgot
+            # Generate up to 3 candidates and execute all; fallback to one
+            candidates = await cypher_gen.generate_candidates(natural_language_query)
+            # Clamp again server-side for safety
             try:
                 import re as _re
-                cypher_query = _re.sub(
-                    r"LIMIT\s+(\d+)",
-                    lambda m: f"LIMIT {min(50, int(m.group(1)))}",
-                    cypher_query,
-                    flags=_re.IGNORECASE,
-                )
+                candidates = [
+                    _re.sub(
+                        r"LIMIT\s+(\d+)",
+                        lambda m: f"LIMIT {min(50, int(m.group(1)))}",
+                        q,
+                        flags=_re.IGNORECASE,
+                    )
+                    for q in candidates
+                ]
             except Exception:
                 pass
 
-            results = ingestor.fetch_all(cypher_query)
-            logger.info(
-                f"[Tool:QueryGraph] Executed Cypher (clamped): {cypher_query} -> {len(results)} result(s)"
-            )
+            aggregated: list[dict[str, object]] = []
+            seen: set[tuple] = set()
+            for idx, q in enumerate(candidates):
+                cypher_query = q
+                rows = ingestor.fetch_all(q)
+                logger.info(
+                    f"[Tool:QueryGraph] Executed Cypher (clamped): {q} -> {len(rows)} result(s)"
+                )
+                for row in rows:
+                    # Create a stable dedupe key across typical return shapes
+                    key = (
+                        row.get("qualified_name"),
+                        row.get("path"),
+                        row.get("name"),
+                        tuple(row.get("type", [])) if isinstance(row.get("type"), list) else row.get("type"),
+                    )
+                    if key not in seen:
+                        seen.add(key)
+                        aggregated.append(row)
 
+            results = aggregated
             if results:
                 table = Table(
                     show_header=True,
@@ -96,7 +116,10 @@ def create_query_tool(
                     )
                 )
 
-            summary = f"Successfully retrieved {len(results)} item(s) from the graph."
+            summary = (
+                f"Retrieved {len(results)} unique item(s) from {len(candidates)} query path(s)."
+            )
+            # Return the last executed query for transparency
             return GraphData(query_used=cypher_query, results=results, summary=summary)
         except LLMGenerationError as e:
             return GraphData(
