@@ -256,14 +256,21 @@ async def ask(
             rag_agent = _initialize_services_and_agent(str(project_root), ingestor)
             response = await rag_agent.run(question, message_history=[])
             output = getattr(response, "output", None)
-            if not output:
+            # Normalize
+            text = _extract_text_answer(output)
+            if not text or _looks_like_fs_payload(text):
                 # Defensive fallback: try once more with a simpler prompt
                 logger.warning("Empty model response; retrying once with simplified prompt")
-                response = await rag_agent.run(question.strip() or "Describe the project structure.", message_history=[])
+                response = await rag_agent.run(
+                    (question.strip() or "Describe the project structure.") +
+                    "\nPlease answer in plain text with a concise explanation.",
+                    message_history=[]
+                )
                 output = getattr(response, "output", None) or ""
-            if not output:
+                text = _extract_text_answer(output)
+            if not text:
                 raise RuntimeError("Model returned empty response")
-        return JSONResponse({"status": "ok", "answer": output, "repo": str(project_root)})
+        return JSONResponse({"status": "ok", "answer": text, "repo": str(project_root)})
     except Exception as e:
         logger.exception("Ask failed")
         raise HTTPException(status_code=500, detail=str(e))
@@ -303,13 +310,15 @@ async def optimize(
                 )
             response = await rag_agent.run(instructions, message_history=[])
             output = getattr(response, "output", None) or ""
-            if not output:
+            text = _extract_text_answer(output) or ""
+            if not text or _looks_like_fs_payload(text):
                 logger.warning("Empty model response during optimize; retrying once")
-                response = await rag_agent.run((instructions + "\nReturn a short bullet list.").strip(), message_history=[])
+                response = await rag_agent.run((instructions + "\nReturn a short bullet list in plain text.").strip(), message_history=[])
                 output = getattr(response, "output", None) or ""
-            if not output:
+                text = _extract_text_answer(output) or ""
+            if not text:
                 raise RuntimeError("Model returned empty response")
-        return JSONResponse({"status": "ok", "result": output, "repo": str(project_root)})
+        return JSONResponse({"status": "ok", "result": text, "repo": str(project_root)})
     except Exception as e:
         logger.exception("Optimize failed")
         raise HTTPException(status_code=500, detail=str(e))
